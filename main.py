@@ -1,4 +1,6 @@
 import os
+import requests
+import base64
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,14 +9,12 @@ from tensorflow.keras.preprocessing import image
 import numpy as np
 from io import BytesIO
 from PIL import Image
+from config import FRONTEND_URL, BASE_URL, MODEL_PATH, UPLOAD_DIRECTORY, GITHUB_TOKEN, GITHUB_REPO
 
 app = FastAPI()
 
-# 상수 정의
-FRONTEND_URL = "https://b3cb-106-255-245-242.ngrok-free.app"
-BASE_URL = "https://a236-106-255-245-242.ngrok-free.app"
-MODEL_PATH = "C:/Users/gabri/Desktop/coding/Painting_Creativity_Tester/model/model15.keras"
-UPLOAD_DIRECTORY = "C:/Users/gabri/Desktop/coding/Painting_Creativity_Server/uploaded_images"
+# GitHub API URL 구성
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
 
 # CORS 미들웨어 추가
 app.add_middleware(
@@ -28,19 +28,48 @@ app.add_middleware(
 # 모델 로드
 model = load_model(MODEL_PATH)
 
+def upload_to_github(file_path, file_content):
+    github_headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    # 파일을 base64로 인코딩
+    encoded_content = base64.b64encode(file_content).decode('utf-8')
+
+    data = {
+        "message": "Add new image",
+        "content": encoded_content,
+        "branch": "main"  # 업로드할 브랜치
+    }
+
+    response = requests.put(f"{GITHUB_API_URL}{file_path}", json=data, headers=github_headers)
+
+    if response.status_code == 201:
+        return response.json()["content"]["download_url"]
+    else:
+        raise Exception(f"Failed to upload to GitHub: {response.status_code}, {response.text}")
+
 @app.post("/upload/")
 async def upload_image(file: UploadFile = File(...)):
-    # 파일 저장 경로 설정
+    # 파일 내용을 읽음
+    file_content = await file.read()
+
+    # 서버에 임시로 파일 저장
     file_path = os.path.join(UPLOAD_DIRECTORY, file.filename)
-        
-    # 파일을 경로에 저장
     with open(file_path, "wb") as f:
-        f.write(await file.read())
+        f.write(file_content)
 
-    # 서버에서 접근 가능한 URL 생성
-    file_url = f"{BASE_URL}/uploads/{file.filename}"
+    # GitHub에 파일 업로드
+    try:
+        github_url = upload_to_github(file.filename, file_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    return {"file_url": file_url}
+    # 서버에서 임시 파일 삭제
+    os.remove(file_path)
+
+    return {"file_url": github_url}
     
 @app.get("/analyze/")
 async def analyze_image(image: str):
@@ -66,6 +95,9 @@ async def analyze_image(image: str):
         "total_score": total_score,
         "category": score_category
     }
+
+    # 분석이 끝난 후 서버에 저장된 이미지 삭제
+    os.remove(img_path)
 
     return JSONResponse(content=result_data)
 
