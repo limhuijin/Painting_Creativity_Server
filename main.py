@@ -58,7 +58,7 @@ def upload_to_github(file_path, file_content):
 
     response = requests.put(f"{GITHUB_API_URL}{file_path}", json=data, headers=github_headers)
 
-    if response.status_code == 201:
+    if response.status_code in [201, 200]:
         return response.json()["content"]["download_url"]
     else:
         raise Exception(f"Failed to upload to GitHub: {response.status_code}, {response.text}")
