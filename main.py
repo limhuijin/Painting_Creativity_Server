@@ -14,7 +14,7 @@ from config import FRONTEND_URL, BASE_URL, MODEL_PATH, UPLOAD_DIRECTORY, GITHUB_
 app = FastAPI()
 
 # GitHub API URL 구성
-GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/uploaded_images/"
 
 # CORS 미들웨어 추가
 app.add_middleware(
@@ -27,6 +27,19 @@ app.add_middleware(
 
 # 모델 로드
 model = load_model(MODEL_PATH)
+
+def find_lowest_available_filename(directory, extension=".png"):
+    """디렉토리 내에서 중복되지 않는 가장 낮은 숫자의 파일명을 찾습니다."""
+    existing_files = [f for f in os.listdir(directory) if f.endswith(extension)]
+    existing_numbers = sorted(int(f.split('.')[0]) for f in existing_files if f.split('.')[0].isdigit())
+    
+    lowest_number = 0
+    for number in existing_numbers:
+        if lowest_number < number:
+            break
+        lowest_number += 1
+    
+    return f"{lowest_number:04d}{extension}"
 
 def upload_to_github(file_path, file_content):
     github_headers = {
@@ -52,54 +65,72 @@ def upload_to_github(file_path, file_content):
 
 @app.post("/upload/")
 async def upload_image(file: UploadFile = File(...)):
-    # 파일 내용을 읽음
-    file_content = await file.read()
-
-    # 서버에 임시로 파일 저장
-    file_path = os.path.join(UPLOAD_DIRECTORY, file.filename)
-    with open(file_path, "wb") as f:
-        f.write(file_content)
-
-    # GitHub에 파일 업로드
     try:
-        github_url = upload_to_github(file.filename, file_content)
+        # 파일 크기 확인 (80MB 이상인 경우 업로드 금지)
+        file_size_mb = len(await file.read()) / (1024 * 1024)
+        if file_size_mb > 80:
+            raise HTTPException(status_code=413, detail="파일 용량이 너무 큽니다. (최대 80MB)")
+
+        # 파일 내용을 다시 읽음
+        await file.seek(0)
+        file_content = await file.read()
+
+        # 중복되지 않는 가장 낮은 숫자로 파일 이름 설정
+        file_name = find_lowest_available_filename(UPLOAD_DIRECTORY)
+        file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
+        
+        # 서버에 임시로 파일 저장
+        with open(file_path, "wb") as f:
+            f.write(file_content)
+
+        # GitHub에 파일 업로드
+        github_url = upload_to_github(f"uploaded_images/{file_name}", file_content)
+
+        return {"file_url": github_url}
+
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 서버에서 임시 파일 삭제
-    os.remove(file_path)
-
-    return {"file_url": github_url}
-    
 @app.get("/analyze/")
 async def analyze_image(image: str):
     img_path = os.path.join(UPLOAD_DIRECTORY, os.path.basename(image))
-    
+
     if not os.path.exists(img_path):
         raise HTTPException(status_code=404, detail="Image not found")
 
-    pil_image = Image.open(img_path).convert('RGB')
-    img_array = prepare_image(pil_image, target_size=(224, 224))
+    for attempt in range(3):  # 총 3회 시도
+        try:
+            pil_image = Image.open(img_path).convert('RGB')
+            img_array = prepare_image(pil_image, target_size=(224, 224))
 
-    # 모델 예측
-    predictions = model.predict(img_array)
-    predictions = predictions[0].tolist()
+            # 모델 예측
+            predictions = model.predict(img_array)
+            predictions = predictions[0].tolist()
 
-    predictions = [max(1, min(5, value)) for value in predictions]
+            predictions = [max(1, min(5, value)) for value in predictions]
 
-    total_score = float(np.sum(predictions))
-    score_category = categorize_score(total_score)
+            total_score = float(np.sum(predictions))
+            score_category = categorize_score(total_score)
 
-    result_data = {
-        "predictions": predictions,
-        "total_score": total_score,
-        "category": score_category
-    }
+            result_data = {
+                "predictions": predictions,
+                "total_score": total_score,
+                "category": score_category
+            }
 
-    # 분석이 끝난 후 서버에 저장된 이미지 삭제
-    os.remove(img_path)
+            # 성공적으로 예측이 끝나면 이미지 삭제
+            os.remove(img_path)
 
-    return JSONResponse(content=result_data)
+            return JSONResponse(content=result_data)
+
+        except Exception as e:
+            if attempt == 2:  # 3회 시도 후 실패 시 이미지 삭제
+                os.remove(img_path)
+                raise HTTPException(status_code=500, detail="이미지 분석에 실패했습니다. 서버에 문제가 발생했습니다.")
+            else:
+                continue  # 다음 시도로 넘어감
 
 def prepare_image(img, target_size):
     img = img.resize(target_size, Image.Resampling.LANCZOS)
