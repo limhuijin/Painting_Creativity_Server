@@ -2,7 +2,8 @@ import os
 import requests
 import base64
 import hashlib
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import asyncio
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from tensorflow.keras.models import load_model
@@ -67,8 +68,14 @@ def hash_file_content(file_content):
     """파일 내용을 해시하여 동일한 파일을 감지합니다."""
     return hashlib.md5(file_content).hexdigest()
 
+async def delete_file_after_delay(file_path: str, delay: int = 300):
+    """주어진 시간(초) 후에 파일을 삭제하는 함수"""
+    await asyncio.sleep(delay)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
 @app.post("/upload/")
-async def upload_image(file: UploadFile = File(...)):
+async def upload_image(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     try:
         # 파일 크기 확인 (80MB 이상인 경우 업로드 금지)
         file_size_mb = len(await file.read()) / (1024 * 1024)
@@ -104,6 +111,9 @@ async def upload_image(file: UploadFile = File(...)):
 
         # GitHub에 파일 업로드
         github_url = upload_to_github(f"uploaded_images/{file_name}", file_content)
+
+        # 업로드가 완료되면 서버의 이미지를 5분 후에 삭제하는 작업 예약
+        background_tasks.add_task(delete_file_after_delay, file_path)
 
         return {"file_url": github_url}
 
