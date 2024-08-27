@@ -1,15 +1,15 @@
 import os
 import requests
 import base64
+import hashlib
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 import numpy as np
-from io import BytesIO
 from PIL import Image
-from config import FRONTEND_URL, BASE_URL, MODEL_PATH, UPLOAD_DIRECTORY, GITHUB_TOKEN, GITHUB_REPO
+from config import MODEL_PATH, UPLOAD_DIRECTORY, GITHUB_TOKEN, GITHUB_REPO
 
 app = FastAPI()
 
@@ -19,7 +19,7 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/uploaded_
 # CORS 미들웨어 추가
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 모든 출처를 허용하려면 "*" 사용
+    allow_origins=["*"],  # 모든 출처를 허용
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,6 +63,10 @@ def upload_to_github(file_path, file_content):
     else:
         raise Exception(f"Failed to upload to GitHub: {response.status_code}, {response.text}")
 
+def hash_file_content(file_content):
+    """파일 내용을 해시하여 동일한 파일을 감지합니다."""
+    return hashlib.md5(file_content).hexdigest()
+
 @app.post("/upload/")
 async def upload_image(file: UploadFile = File(...)):
     try:
@@ -78,7 +82,22 @@ async def upload_image(file: UploadFile = File(...)):
         # 중복되지 않는 가장 낮은 숫자로 파일 이름 설정
         file_name = find_lowest_available_filename(UPLOAD_DIRECTORY)
         file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
-        
+
+        # 동일한 이미지가 있는지 확인하기 위해 파일 해시 계산
+        file_hash = hash_file_content(file_content)
+
+        # GitHub에서 동일한 해시를 가진 파일이 있는지 확인
+        github_headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        response = requests.get(f"{GITHUB_API_URL}?ref=main", headers=github_headers)
+        if response.status_code == 200:
+            existing_files = response.json()
+            for file in existing_files:
+                if 'sha' in file and file['sha'] == file_hash:
+                    return {"file_url": file["download_url"]}
+
         # 서버에 임시로 파일 저장
         with open(file_path, "wb") as f:
             f.write(file_content)
