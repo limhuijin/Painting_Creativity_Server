@@ -51,6 +51,7 @@ def upload_to_github(file_path, file_content):
     # 파일을 base64로 인코딩
     encoded_content = base64.b64encode(file_content).decode('utf-8')
 
+    # GitHub에 업로드할 데이터 구성
     data = {
         "message": "Add new image",
         "content": encoded_content,
@@ -64,23 +65,13 @@ def upload_to_github(file_path, file_content):
     else:
         raise Exception(f"Failed to upload to GitHub: {response.status_code}, {response.text}")
 
-def hash_file_content(file_content):
-    """파일 내용을 해시하여 동일한 파일을 감지합니다."""
-    return hashlib.md5(file_content).hexdigest()
-
-async def delete_file_after_delay(file_path: str, delay: int = 300):
-    """주어진 시간(초) 후에 파일을 삭제하는 함수"""
-    await asyncio.sleep(delay)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
 @app.post("/upload/")
 async def upload_image(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     try:
-        # 파일 크기 확인 (80MB 이상인 경우 업로드 금지)
+        # 파일 크기 확인 (10MB 이상인 경우 업로드 금지)
         file_size_mb = len(await file.read()) / (1024 * 1024)
-        if file_size_mb > 80:
-            raise HTTPException(status_code=413, detail="파일 용량이 너무 큽니다. (최대 80MB)")
+        if file_size_mb > 10:
+            raise HTTPException(status_code=413, detail="파일 용량이 너무 큽니다. (최대 10MB)")
 
         # 파일 내용을 다시 읽음
         await file.seek(0)
@@ -90,30 +81,15 @@ async def upload_image(background_tasks: BackgroundTasks, file: UploadFile = Fil
         file_name = find_lowest_available_filename(UPLOAD_DIRECTORY)
         file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
 
-        # 동일한 이미지가 있는지 확인하기 위해 파일 해시 계산
-        file_hash = hash_file_content(file_content)
-
-        # GitHub에서 동일한 해시를 가진 파일이 있는지 확인
-        github_headers = {
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Content-Type": "application/json",
-        }
-        response = requests.get(f"{GITHUB_API_URL}?ref=main", headers=github_headers)
-        if response.status_code == 200:
-            existing_files = response.json()
-            for file in existing_files:
-                if 'sha' in file and file['sha'] == file_hash:
-                    return {"file_url": file["download_url"]}
-
         # 서버에 임시로 파일 저장
         with open(file_path, "wb") as f:
             f.write(file_content)
 
+        # 5분 후 파일 삭제 작업 예약
+        background_tasks.add_task(delete_file_after_delay, file_path)
+
         # GitHub에 파일 업로드
         github_url = upload_to_github(f"uploaded_images/{file_name}", file_content)
-
-        # 업로드가 완료되면 서버의 이미지를 5분 후에 삭제하는 작업 예약
-        background_tasks.add_task(delete_file_after_delay, file_path)
 
         return {"file_url": github_url}
 
@@ -149,14 +125,10 @@ async def analyze_image(image: str):
                 "category": score_category
             }
 
-            # 성공적으로 예측이 끝나면 이미지 삭제
-            os.remove(img_path)
-
             return JSONResponse(content=result_data)
 
         except Exception as e:
-            if attempt == 2:  # 3회 시도 후 실패 시 이미지 삭제
-                os.remove(img_path)
+            if attempt == 2:  # 3회 시도 후 실패 시 예외 발생
                 raise HTTPException(status_code=500, detail="이미지 분석에 실패했습니다. 서버에 문제가 발생했습니다.")
             else:
                 continue  # 다음 시도로 넘어감
@@ -175,3 +147,9 @@ def categorize_score(score):
         return 'Medium'
     else:
         return 'High'
+
+async def delete_file_after_delay(file_path: str, delay: int = 300):
+    """일정 시간 후에 파일을 삭제하는 함수"""
+    await asyncio.sleep(delay)
+    if os.path.exists(file_path):
+        os.remove(file_path)
