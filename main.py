@@ -68,14 +68,13 @@ def upload_to_github(file_path, file_content):
 @app.post("/upload/")
 async def upload_image(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     try:
+        # 파일 내용을 한 번만 읽음
+        file_content = await file.read()
+
         # 파일 크기 확인 (10MB 이상인 경우 업로드 금지)
-        file_size_mb = len(await file.read()) / (1024 * 1024)
+        file_size_mb = len(file_content) / (1024 * 1024)
         if file_size_mb > 10:
             raise HTTPException(status_code=413, detail="파일 용량이 너무 큽니다. (최대 10MB)")
-
-        # 파일 내용을 다시 읽음
-        await file.seek(0)
-        file_content = await file.read()
 
         # 중복되지 않는 가장 낮은 숫자로 파일 이름 설정
         file_name = find_lowest_available_filename(UPLOAD_DIRECTORY)
@@ -105,36 +104,32 @@ async def analyze_image(image: str):
     if not os.path.exists(img_path):
         raise HTTPException(status_code=404, detail="Image not found")
 
-    for attempt in range(3):  # 총 3회 시도
-        try:
-            pil_image = Image.open(img_path).convert('RGB')
-            img_array = prepare_image(pil_image, target_size=(224, 224))
+    try:
+        pil_image = Image.open(img_path).convert('RGB')
+        img_array = prepare_image(pil_image, target_size=(224, 224))
 
-            # 모델 예측
-            predictions = model.predict(img_array)
-            predictions = predictions[0].tolist()
+        # 모델 예측
+        predictions = model.predict(img_array)
+        predictions = predictions[0].tolist()
 
-            predictions = [max(1, min(5, value)) for value in predictions]
+        predictions = [max(1, min(5, value)) for value in predictions]
 
-            total_score = float(np.sum(predictions))
-            score_category = categorize_score(total_score)
+        total_score = float(np.sum(predictions))
+        score_category = categorize_score(total_score)
 
-            result_data = {
-                "predictions": predictions,
-                "total_score": total_score,
-                "category": score_category
-            }
+        result_data = {
+            "predictions": predictions,
+            "total_score": total_score,
+            "category": score_category
+        }
 
-            return JSONResponse(content=result_data)
+        return JSONResponse(content=result_data)
 
-        except Exception as e:
-            if attempt == 2:  # 3회 시도 후 실패 시 예외 발생
-                raise HTTPException(status_code=500, detail="이미지 분석에 실패했습니다. 서버에 문제가 발생했습니다.")
-            else:
-                continue  # 다음 시도로 넘어감
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="이미지 분석에 실패했습니다. 서버에 문제가 발생했습니다.")
 
 def prepare_image(img, target_size):
-    img = img.resize(target_size, Image.Resampling.LANCZOS)
+    img = img.resize(target_size, Image.LANCZOS)
     img_array = image.img_to_array(img)
     img_array = np.expand_dims(img_array, axis=0)
     img_array /= 255.0
